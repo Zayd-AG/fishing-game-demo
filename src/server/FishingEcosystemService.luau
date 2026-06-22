@@ -30,6 +30,7 @@ local ShipMovementRequestRemoteName = "ShipMovementRequested"
 
 local MaximumAllowedShipMoveDistance = 18
 local BaseFishPerNetCast = 1
+local ShipPromptPartName = "ShipCastNetPromptPart"
 
 local FishLootTable: { FishLootEntry } = {
 	{
@@ -119,6 +120,29 @@ local function getFishingProgressForPlayer(player: Player): PlayerFishingProgres
 	return newProgress
 end
 
+local function getOrCreateLeaderstatsCoins(player: Player): IntValue
+	-- Leaderstats make the prototype reward loop visible without adding a custom economy UI yet.
+	local leaderstatsFolder = player:FindFirstChild("leaderstats")
+
+	if not leaderstatsFolder then
+		leaderstatsFolder = Instance.new("Folder")
+		leaderstatsFolder.Name = "leaderstats"
+		leaderstatsFolder.Parent = player
+	end
+
+	local coinsValue = leaderstatsFolder:FindFirstChild("Coins")
+
+	if coinsValue and coinsValue:IsA("IntValue") then
+		return coinsValue
+	end
+
+	local newCoinsValue = Instance.new("IntValue")
+	newCoinsValue.Name = "Coins"
+	newCoinsValue.Parent = leaderstatsFolder
+
+	return newCoinsValue
+end
+
 local function calculateLuckMultiplier(playerFishingProgress: PlayerFishingProgress): number
 	-- Each luck upgrade gives rare fish more weight without making common fish disappear.
 	return 1 + (playerFishingProgress.LuckUpgradeLevel * 0.15)
@@ -188,6 +212,7 @@ local function castNetForPlayer(player: Player): CastNetResult
 	end
 
 	playerFishingProgress.Coins += totalSellValue
+	getOrCreateLeaderstatsCoins(player).Value = playerFishingProgress.Coins
 
 	return {
 		FishCaught = fishCaught,
@@ -224,6 +249,23 @@ local function handleCastNetRequested(player: Player)
 	FishCaughtRemote:FireClient(player, castNetResult)
 end
 
+local function connectShipCastNetPrompt()
+	-- A Studio-built ship can expose a normal ProximityPrompt, which makes fishing discoverable in-world.
+	local shipPromptPart = workspace:FindFirstChild(ShipPromptPartName, true)
+
+	if not shipPromptPart or not shipPromptPart:IsA("BasePart") then
+		return
+	end
+
+	local castNetPrompt = shipPromptPart:FindFirstChildOfClass("ProximityPrompt")
+
+	if not castNetPrompt then
+		return
+	end
+
+	castNetPrompt.Triggered:Connect(handleCastNetRequested)
+end
+
 local function handleShipMovementRequested(player: Player, requestedShipCFrame: CFrame)
 	-- The prototype trusts Studio placeholder ships by name, but still validates movement size.
 	if typeof(requestedShipCFrame) ~= "CFrame" then
@@ -252,7 +294,12 @@ function FishingEcosystemService.Start()
 	-- Start wires remotes once; the service stays simple because each handler is small and named.
 	CastNetRequestedRemote.OnServerEvent:Connect(handleCastNetRequested)
 	ShipMovementRequestedRemote.OnServerEvent:Connect(handleShipMovementRequested)
+	Players.PlayerAdded:Connect(function(player)
+		-- Creating the visible counter on join helps testers immediately see fishing rewards.
+		getOrCreateLeaderstatsCoins(player)
+	end)
 	Players.PlayerRemoving:Connect(handlePlayerRemoving)
+	connectShipCastNetPrompt()
 end
 
 return FishingEcosystemService

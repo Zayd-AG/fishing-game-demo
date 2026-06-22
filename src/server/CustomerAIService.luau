@@ -22,11 +22,19 @@ export type CustomerState = {
 }
 
 local Players = game:GetService("Players")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local RunService = game:GetService("RunService")
 
 local CustomerAIService = {}
 
-local CustomerSpawnIntervalSeconds = 8
+local RemoteFolderName = "GameRemotes"
+local PlaceStoreItemRequestRemoteName = "PlaceStoreItemRequested"
+local StoreStatusChangedRemoteName = "StoreStatusChanged"
+local PlacementCollisionFolderName = "PlacedStoreItems"
+
+local GridCellSize = 4
+local StoreBoundsPartName = "StorePlacementBounds"
+local CustomerSpawnIntervalSeconds = 6
 local CustomerWalkSpeedStudsPerSecond = 8
 local BrowseDurationSeconds = 5
 local DespawnDistanceStuds = 60
@@ -34,7 +42,41 @@ local MessChanceAfterCustomerLeaves = 0.25
 
 local ActiveCustomerStates: { CustomerState } = {}
 local StoreManagementDataByUserId: { [number]: StoreManagementData } = {}
-local SecondsSinceLastCustomerSpawn = 0
+local SecondsSinceLastCustomerSpawn = CustomerSpawnIntervalSeconds
+
+local function getOrCreateRemoteFolder(): Folder
+	-- All prototype remotes share one folder so networking stays easy to inspect in ReplicatedStorage.
+	local existingRemoteFolder = ReplicatedStorage:FindFirstChild(RemoteFolderName)
+
+	if existingRemoteFolder and existingRemoteFolder:IsA("Folder") then
+		return existingRemoteFolder
+	end
+
+	local newRemoteFolder = Instance.new("Folder")
+	newRemoteFolder.Name = RemoteFolderName
+	newRemoteFolder.Parent = ReplicatedStorage
+
+	return newRemoteFolder
+end
+
+local function getOrCreateRemoteEvent(remoteEventName: string): RemoteEvent
+	-- Creating remotes in code keeps Rojo script sync simple while still giving Studio a visible folder.
+	local remoteFolder = getOrCreateRemoteFolder()
+	local existingRemoteEvent = remoteFolder:FindFirstChild(remoteEventName)
+
+	if existingRemoteEvent and existingRemoteEvent:IsA("RemoteEvent") then
+		return existingRemoteEvent
+	end
+
+	local newRemoteEvent = Instance.new("RemoteEvent")
+	newRemoteEvent.Name = remoteEventName
+	newRemoteEvent.Parent = remoteFolder
+
+	return newRemoteEvent
+end
+
+local PlaceStoreItemRequestedRemote = getOrCreateRemoteEvent(PlaceStoreItemRequestRemoteName)
+local StoreStatusChangedRemote = getOrCreateRemoteEvent(StoreStatusChangedRemoteName)
 
 local function getStoreDataForPlayer(player: Player): StoreManagementData
 	-- Store data is intentionally small so the tycoon loop can be understood in one file.
@@ -55,6 +97,11 @@ local function getStoreDataForPlayer(player: Player): StoreManagementData
 	StoreManagementDataByUserId[player.UserId] = newStoreData
 
 	return newStoreData
+end
+
+local function sendStoreStatusToPlayer(player: Player)
+	-- The client gets one small data packet whenever the store changes so the UI stays honest.
+	StoreStatusChangedRemote:FireClient(player, getStoreDataForPlayer(player))
 end
 
 local function calculateStoreSizeForLevel(storeLevel: number): (number, number)
@@ -82,6 +129,7 @@ local function addMessToStore(player: Player)
 	local storeData = getStoreDataForPlayer(player)
 
 	storeData.MessCount += 1
+	sendStoreStatusToPlayer(player)
 end
 
 local function cleanOneMessFromStore(player: Player)
@@ -89,10 +137,11 @@ local function cleanOneMessFromStore(player: Player)
 	local storeData = getStoreDataForPlayer(player)
 
 	storeData.MessCount = math.max(0, storeData.MessCount - 1)
+	sendStoreStatusToPlayer(player)
 end
 
 local function createPlaceholderCustomerModel(customerSpawnPosition: Vector3): Model
-	-- The placeholder is made from one Part so it can be swapped for a Blender rig later without changing AI flow.
+	-- The placeholder is built from obvious body parts so it reads as a customer before final Blender rigs exist.
 	local customerModel = Instance.new("Model")
 	customerModel.Name = "PrototypeCustomer"
 
@@ -101,13 +150,61 @@ local function createPlaceholderCustomerModel(customerSpawnPosition: Vector3): M
 	bodyPart.Anchored = true
 	bodyPart.Size = Vector3.new(2, 4, 2)
 	bodyPart.Position = customerSpawnPosition
-	bodyPart.Color = Color3.fromRGB(255, 230, 160)
+	bodyPart.Color = Color3.fromRGB(70, 120, 255)
 	bodyPart.Parent = customerModel
+
+	local headPart = Instance.new("Part")
+	headPart.Name = "Head"
+	headPart.Anchored = true
+	headPart.Shape = Enum.PartType.Ball
+	headPart.Size = Vector3.new(1.5, 1.5, 1.5)
+	headPart.Position = customerSpawnPosition + Vector3.new(0, 2.75, 0)
+	headPart.Color = Color3.fromRGB(255, 220, 170)
+	headPart.Parent = customerModel
+
+	local stateBillboard = Instance.new("BillboardGui")
+	stateBillboard.Name = "StateBillboard"
+	stateBillboard.Size = UDim2.fromOffset(180, 40)
+	stateBillboard.StudsOffset = Vector3.new(0, 4, 0)
+	stateBillboard.AlwaysOnTop = true
+	stateBillboard.Parent = headPart
+
+	local stateLabel = Instance.new("TextLabel")
+	stateLabel.Name = "StateLabel"
+	stateLabel.BackgroundTransparency = 0.25
+	stateLabel.BackgroundColor3 = Color3.fromRGB(20, 20, 20)
+	stateLabel.Size = UDim2.fromScale(1, 1)
+	stateLabel.Font = Enum.Font.GothamBold
+	stateLabel.TextColor3 = Color3.fromRGB(255, 255, 255)
+	stateLabel.TextScaled = true
+	stateLabel.Text = "Spawning"
+	stateLabel.Parent = stateBillboard
 
 	customerModel.PrimaryPart = bodyPart
 	customerModel.Parent = workspace
 
 	return customerModel
+end
+
+local function updateCustomerStateBillboard(customerState: CustomerState)
+	-- The label makes the state machine visible while we tune the customer loop.
+	local headPart = customerState.Model:FindFirstChild("Head")
+
+	if not headPart then
+		return
+	end
+
+	local stateBillboard = headPart:FindFirstChild("StateBillboard")
+
+	if not stateBillboard then
+		return
+	end
+
+	local stateLabel = stateBillboard:FindFirstChild("StateLabel")
+
+	if stateLabel and stateLabel:IsA("TextLabel") then
+		stateLabel.Text = customerState.StateName
+	end
 end
 
 local function setCustomerState(customerState: CustomerState, nextStateName: CustomerStateName, targetPosition: Vector3?)
@@ -118,6 +215,8 @@ local function setCustomerState(customerState: CustomerState, nextStateName: Cus
 	if targetPosition then
 		customerState.TargetPosition = targetPosition
 	end
+
+	updateCustomerStateBillboard(customerState)
 end
 
 local function getStoreEntrancePosition(): Vector3
@@ -129,6 +228,28 @@ local function getStoreEntrancePosition(): Vector3
 	end
 
 	return Vector3.new(0, 2, -20)
+end
+
+local function getBrowsingSpotPosition(): Vector3
+	-- A browsing point keeps customers moving into the shop instead of stopping at the door.
+	local browsingSpot = workspace:FindFirstChild("BrowsingSpot")
+
+	if browsingSpot and browsingSpot:IsA("BasePart") then
+		return browsingSpot.Position
+	end
+
+	return Vector3.new(0, 2, 28)
+end
+
+local function getCheckoutPosition(): Vector3
+	-- The checkout point gives the buying state a real destination near the counter.
+	local checkoutSpot = workspace:FindFirstChild("CheckoutSpot")
+
+	if checkoutSpot and checkoutSpot:IsA("BasePart") then
+		return checkoutSpot.Position
+	end
+
+	return Vector3.new(-10, 2, 18)
 end
 
 local function getCustomerSpawnPosition(): Vector3
@@ -206,27 +327,36 @@ local function updateWalkingToStoreState(customerState: CustomerState, deltaTime
 	local reachedStore = moveCustomerTowardTarget(customerState, deltaTime)
 
 	if reachedStore then
-		setCustomerState(customerState, "Browsing")
+		setCustomerState(customerState, "Browsing", getBrowsingSpotPosition())
 	end
 end
 
-local function updateBrowsingState(customerState: CustomerState)
-	-- Browsing waits a few seconds so buying feels like a decision instead of an instant event.
+local function updateBrowsingState(customerState: CustomerState, deltaTime: number)
+	-- Customers walk to the browsing spot first, then wait so the shop feels active.
+	moveCustomerTowardTarget(customerState, deltaTime)
+
 	local secondsSpentBrowsing = os.clock() - customerState.StateStartedAt
 
 	if secondsSpentBrowsing >= BrowseDurationSeconds then
-		setCustomerState(customerState, "Buying")
+		setCustomerState(customerState, "Buying", getCheckoutPosition())
 	end
 end
 
-local function updateBuyingState(customerState: CustomerState)
+local function updateBuyingState(customerState: CustomerState, deltaTime: number)
 	-- Buying rewards a store owner, then immediately transitions into leaving.
+	local reachedCheckout = moveCustomerTowardTarget(customerState, deltaTime)
+
+	if not reachedCheckout then
+		return
+	end
+
 	local customerOwner = chooseCustomerOwner()
 
 	if customerOwner then
 		local storeData = getStoreDataForPlayer(customerOwner)
 
 		storeData.CoinsWaitingToCollect += 12
+		sendStoreStatusToPlayer(customerOwner)
 
 		if math.random() < MessChanceAfterCustomerLeaves then
 			addMessToStore(customerOwner)
@@ -250,12 +380,118 @@ local function updateOneCustomer(customerState: CustomerState, deltaTime: number
 	if customerState.StateName == "WalkingToStore" then
 		updateWalkingToStoreState(customerState, deltaTime)
 	elseif customerState.StateName == "Browsing" then
-		updateBrowsingState(customerState)
+		updateBrowsingState(customerState, deltaTime)
 	elseif customerState.StateName == "Buying" then
-		updateBuyingState(customerState)
+		updateBuyingState(customerState, deltaTime)
 	elseif customerState.StateName == "Leaving" then
 		updateLeavingState(customerState, deltaTime)
 	end
+end
+
+local function getPlacementCollisionFolder(): Folder
+	-- The folder is the single source of truth for placed shop objects and overlap checks.
+	local existingFolder = workspace:FindFirstChild(PlacementCollisionFolderName)
+
+	if existingFolder and existingFolder:IsA("Folder") then
+		return existingFolder
+	end
+
+	local newFolder = Instance.new("Folder")
+	newFolder.Name = PlacementCollisionFolderName
+	newFolder.Parent = workspace
+
+	return newFolder
+end
+
+local function isPlacementInsideStoreBounds(itemWorldCFrame: CFrame, itemWorldSize: Vector3): boolean
+	-- Object-space math lets the build area be moved or rotated in Studio without rewriting code.
+	local storeBoundsPart = workspace:FindFirstChild(StoreBoundsPartName)
+
+	if not storeBoundsPart or not storeBoundsPart:IsA("BasePart") then
+		return false
+	end
+
+	local localPositionInsideStore = storeBoundsPart.CFrame:PointToObjectSpace(itemWorldCFrame.Position)
+	local halfStoreWidth = storeBoundsPart.Size.X / 2
+	local halfStoreDepth = storeBoundsPart.Size.Z / 2
+	local halfItemWidth = itemWorldSize.X / 2
+	local halfItemDepth = itemWorldSize.Z / 2
+
+	return localPositionInsideStore.X - halfItemWidth >= -halfStoreWidth
+		and localPositionInsideStore.X + halfItemWidth <= halfStoreWidth
+		and localPositionInsideStore.Z - halfItemDepth >= -halfStoreDepth
+		and localPositionInsideStore.Z + halfItemDepth <= halfStoreDepth
+end
+
+local function doesPlacementOverlapExistingItems(itemWorldCFrame: CFrame, itemWorldSize: Vector3): boolean
+	-- The server repeats the client overlap check because clients should never be trusted with placement truth.
+	local overlapParameters = OverlapParams.new()
+	overlapParameters.FilterType = Enum.RaycastFilterType.Include
+	overlapParameters.FilterDescendantsInstances = { getPlacementCollisionFolder() }
+
+	local overlappingParts = workspace:GetPartBoundsInBox(itemWorldCFrame, itemWorldSize, overlapParameters)
+
+	return #overlappingParts > 0
+end
+
+local function createFishTankAtCFrame(itemWorldCFrame: CFrame)
+	-- The tank is a simple part model today, and each named part can later be replaced by a mesh.
+	local fishTankModel = Instance.new("Model")
+	fishTankModel.Name = "FishTank"
+
+	local tankStand = Instance.new("Part")
+	tankStand.Name = "Stand"
+	tankStand.Anchored = true
+	tankStand.Size = Vector3.new(GridCellSize * 2, 1, GridCellSize)
+	tankStand.CFrame = itemWorldCFrame * CFrame.new(0, -0.5, 0)
+	tankStand.Color = Color3.fromRGB(60, 45, 35)
+	tankStand.Parent = fishTankModel
+
+	local waterPart = Instance.new("Part")
+	waterPart.Name = "Water"
+	waterPart.Anchored = true
+	waterPart.Size = Vector3.new((GridCellSize * 2) - 0.5, 2, GridCellSize - 0.5)
+	waterPart.CFrame = itemWorldCFrame * CFrame.new(0, 1, 0)
+	waterPart.Color = Color3.fromRGB(70, 180, 255)
+	waterPart.Transparency = 0.35
+	waterPart.Material = Enum.Material.Glass
+	waterPart.Parent = fishTankModel
+
+	local fishPart = Instance.new("Part")
+	fishPart.Name = "DisplayFish"
+	fishPart.Anchored = true
+	fishPart.Shape = Enum.PartType.Ball
+	fishPart.Size = Vector3.new(0.8, 0.4, 0.4)
+	fishPart.CFrame = itemWorldCFrame * CFrame.new(0, 1.2, 0)
+	fishPart.Color = Color3.fromRGB(255, 210, 70)
+	fishPart.Parent = fishTankModel
+
+	fishTankModel.PrimaryPart = tankStand
+	fishTankModel.Parent = getPlacementCollisionFolder()
+end
+
+local function handlePlaceStoreItemRequested(player: Player, itemName: string, itemWorldCFrame: CFrame)
+	-- This is the server authority point for build mode: clients request placement, but the server decides.
+	if itemName ~= "FishTank" then
+		return
+	end
+
+	if typeof(itemWorldCFrame) ~= "CFrame" then
+		return
+	end
+
+	local itemWorldSize = Vector3.new(GridCellSize * 2, 3, GridCellSize)
+
+	if not isPlacementInsideStoreBounds(itemWorldCFrame, itemWorldSize) then
+		return
+	end
+
+	if doesPlacementOverlapExistingItems(itemWorldCFrame, itemWorldSize) then
+		return
+	end
+
+	createFishTankAtCFrame(itemWorldCFrame)
+	sendStoreStatusToPlayer(player)
 end
 
 local function removeDespawnedCustomers()
@@ -301,6 +537,8 @@ end
 function CustomerAIService.Start()
 	-- Heartbeat is enough for prototype AI because movement is simple and server-owned.
 	RunService.Heartbeat:Connect(updateAllCustomers)
+	PlaceStoreItemRequestedRemote.OnServerEvent:Connect(handlePlaceStoreItemRequested)
+	Players.PlayerAdded:Connect(sendStoreStatusToPlayer)
 	Players.PlayerRemoving:Connect(handlePlayerRemoving)
 end
 

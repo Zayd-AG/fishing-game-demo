@@ -23,6 +23,11 @@ local StoreBuilderController = {}
 local LocalPlayer = Players.LocalPlayer
 local Mouse = LocalPlayer:GetMouse()
 
+local RemoteFolderName = "GameRemotes"
+local FishCaughtRemoteName = "FishCaught"
+local PlaceStoreItemRequestRemoteName = "PlaceStoreItemRequested"
+local StoreStatusChangedRemoteName = "StoreStatusChanged"
+
 local GridCellSize = 4
 local StoreBoundsPartName = "StorePlacementBounds"
 local PlacementCollisionFolderName = "PlacedStoreItems"
@@ -41,6 +46,20 @@ local IsBuildModeEnabled = false
 local SelectedBuildableItem: BuildableItemDefinition = BuildableItemsByName.FishTank
 local GhostBlock: Part? = nil
 local LastPlacementResult: GridPlacementResult? = nil
+local StatusLabel: TextLabel? = nil
+local FishCaughtLabel: TextLabel? = nil
+local BuildModeButton: TextButton? = nil
+
+local function getRemoteEvent(remoteEventName: string): RemoteEvent
+	-- Waiting for remotes keeps startup order simple between Rojo sync and server service creation.
+	local remoteFolder = ReplicatedStorage:WaitForChild(RemoteFolderName)
+
+	return remoteFolder:WaitForChild(remoteEventName) :: RemoteEvent
+end
+
+local FishCaughtRemote = getRemoteEvent(FishCaughtRemoteName)
+local PlaceStoreItemRequestedRemote = getRemoteEvent(PlaceStoreItemRequestRemoteName)
+local StoreStatusChangedRemote = getRemoteEvent(StoreStatusChangedRemoteName)
 
 local function getStoreBoundsPart(): BasePart?
 	-- A simple Studio part defines the buildable area so level designers can resize the store visually.
@@ -81,6 +100,68 @@ local function createGhostBlock(): Part
 	ghostBlock.Parent = workspace
 
 	return ghostBlock
+end
+
+local function createPrototypeHud()
+	-- The HUD makes the prototype self-explanatory for playtests without adding a heavy UI framework.
+	local playerGui = LocalPlayer:WaitForChild("PlayerGui")
+	local screenGui = Instance.new("ScreenGui")
+	screenGui.Name = "PrototypeHud"
+	screenGui.ResetOnSpawn = false
+	screenGui.Parent = playerGui
+
+	local statusLabel = Instance.new("TextLabel")
+	statusLabel.Name = "StatusLabel"
+	statusLabel.AnchorPoint = Vector2.new(0, 1)
+	statusLabel.Position = UDim2.fromScale(0.02, 0.98)
+	statusLabel.Size = UDim2.fromOffset(440, 88)
+	statusLabel.BackgroundColor3 = Color3.fromRGB(20, 24, 30)
+	statusLabel.BackgroundTransparency = 0.15
+	statusLabel.Font = Enum.Font.Gotham
+	statusLabel.TextColor3 = Color3.fromRGB(255, 255, 255)
+	statusLabel.TextSize = 18
+	statusLabel.TextXAlignment = Enum.TextXAlignment.Left
+	statusLabel.TextYAlignment = Enum.TextYAlignment.Center
+	statusLabel.TextWrapped = true
+	statusLabel.Text = "Go to the ship and press the prompt to cast your net. Press B to build fish tanks in the shop."
+	statusLabel.Parent = screenGui
+
+	local fishCaughtLabel = Instance.new("TextLabel")
+	fishCaughtLabel.Name = "FishCaughtLabel"
+	fishCaughtLabel.AnchorPoint = Vector2.new(0.5, 0)
+	fishCaughtLabel.Position = UDim2.fromScale(0.5, 0.06)
+	fishCaughtLabel.Size = UDim2.fromOffset(420, 70)
+	fishCaughtLabel.BackgroundColor3 = Color3.fromRGB(10, 35, 55)
+	fishCaughtLabel.BackgroundTransparency = 0.1
+	fishCaughtLabel.Font = Enum.Font.GothamBold
+	fishCaughtLabel.TextColor3 = Color3.fromRGB(255, 255, 255)
+	fishCaughtLabel.TextSize = 24
+	fishCaughtLabel.TextWrapped = true
+	fishCaughtLabel.Visible = false
+	fishCaughtLabel.Parent = screenGui
+
+	local buildModeButton = Instance.new("TextButton")
+	buildModeButton.Name = "BuildModeButton"
+	buildModeButton.AnchorPoint = Vector2.new(1, 1)
+	buildModeButton.Position = UDim2.fromScale(0.98, 0.98)
+	buildModeButton.Size = UDim2.fromOffset(220, 56)
+	buildModeButton.BackgroundColor3 = Color3.fromRGB(70, 120, 255)
+	buildModeButton.Font = Enum.Font.GothamBold
+	buildModeButton.TextColor3 = Color3.fromRGB(255, 255, 255)
+	buildModeButton.TextSize = 18
+	buildModeButton.Text = "Build Fish Tank (B)"
+	buildModeButton.Parent = screenGui
+
+	StatusLabel = statusLabel
+	FishCaughtLabel = fishCaughtLabel
+	BuildModeButton = buildModeButton
+end
+
+local function updateStatusText(message: string)
+	-- A single status label gives immediate feedback for build mode, fishing, and customer rewards.
+	if StatusLabel then
+		StatusLabel.Text = message
+	end
 end
 
 local function setGhostBlockColor(isPlacementValid: boolean)
@@ -262,18 +343,14 @@ local function updateGhostBlock()
 end
 
 local function placeSelectedItem()
-	-- The prototype creates the item locally first; the next step is sending this placement to a server validator.
+	-- The client sends the chosen CFrame, then the server repeats validation before creating the tank.
 	if not LastPlacementResult or not LastPlacementResult.IsValid then
+		updateStatusText("Move the ghost inside the shop and away from other tanks before placing.")
 		return
 	end
 
-	local placedItem = Instance.new("Part")
-	placedItem.Name = SelectedBuildableItem.Name
-	placedItem.Anchored = true
-	placedItem.Size = calculateItemWorldSize(SelectedBuildableItem)
-	placedItem.CFrame = LastPlacementResult.WorldCFrame
-	placedItem.Color = SelectedBuildableItem.PreviewColor
-	placedItem.Parent = getOrCreatePlacementCollisionFolder()
+	PlaceStoreItemRequestedRemote:FireServer(SelectedBuildableItem.Name, LastPlacementResult.WorldCFrame)
+	updateStatusText("Placed a fish tank request. Customers can browse and buy from your shop.")
 end
 
 local function setBuildModeEnabled(shouldEnableBuildMode: boolean)
@@ -284,6 +361,16 @@ local function setBuildModeEnabled(shouldEnableBuildMode: boolean)
 		GhostBlock:Destroy()
 		GhostBlock = nil
 		LastPlacementResult = nil
+	end
+
+	if BuildModeButton then
+		BuildModeButton.Text = if IsBuildModeEnabled then "Placing Fish Tank" else "Build Fish Tank (B)"
+	end
+
+	if IsBuildModeEnabled then
+		updateStatusText("Build mode is on. Move your mouse over the blue shop floor and click to place a fish tank.")
+	else
+		updateStatusText("Build mode is off. Go to the ship prompt to cast your net, or press B to build.")
 	end
 end
 
@@ -300,10 +387,45 @@ local function handleInputBegan(inputObject: InputObject, wasHandledByRoblox: bo
 	end
 end
 
+local function handleFishCaught(castNetResult)
+	-- The server tells us the rarest fish so the client can play the most exciting popup.
+	local rarestFishCaught = castNetResult.RarestFishCaught
+
+	if not FishCaughtLabel or not rarestFishCaught then
+		return
+	end
+
+	FishCaughtLabel.Text = `Caught {rarestFishCaught.RarityName}: {rarestFishCaught.Name}! +{castNetResult.TotalSellValue} coins`
+	FishCaughtLabel.Visible = true
+	updateStatusText("Nice catch. Add tanks in the shop so customers have something clear to browse.")
+
+	task.delay(3, function()
+		if FishCaughtLabel then
+			FishCaughtLabel.Visible = false
+		end
+	end)
+end
+
+local function handleStoreStatusChanged(storeData)
+	-- Store data feedback makes customer purchases and mess visible before final tycoon UI exists.
+	updateStatusText(
+		`Shop level {storeData.StoreLevel} | Waiting coins: {storeData.CoinsWaitingToCollect} | Messes to clean: {storeData.MessCount}`
+	)
+end
+
 function StoreBuilderController.Start()
 	-- Start connects input and render updates without introducing a larger controller framework.
+	createPrototypeHud()
 	UserInputService.InputBegan:Connect(handleInputBegan)
 	RunService.RenderStepped:Connect(updateGhostBlock)
+	FishCaughtRemote.OnClientEvent:Connect(handleFishCaught)
+	StoreStatusChangedRemote.OnClientEvent:Connect(handleStoreStatusChanged)
+
+	if BuildModeButton then
+		BuildModeButton.Activated:Connect(function()
+			setBuildModeEnabled(not IsBuildModeEnabled)
+		end)
+	end
 end
 
 return StoreBuilderController
