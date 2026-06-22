@@ -7,4 +7,5 @@ realm = "shared"
 [dependencies]
 
 [server-dependencies]
+# Server-only data packages belong here so clients never receive persistence modules.
 ProfileStore = "2jammers/profilestore@0.1.0"

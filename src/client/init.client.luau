@@ -1,1 +1,3 @@
-print("Hello world, from client!")
+local StoreBuilderController = require(script.StoreBuilderController)
+
+StoreBuilderController.Start()
