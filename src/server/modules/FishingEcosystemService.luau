@@ -21,6 +21,10 @@ export type CastNetResult = {
 local Players = game:GetService("Players")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 
+require(script.Parent.PlayerProfileStore)
+
+local DataManager = require(script.Parent.DataManager)
+
 local FishingEcosystemService = {}
 
 local RemoteFolderName = "GameRemotes"
@@ -63,7 +67,6 @@ local FishLootTable: { FishLootEntry } = {
 	},
 }
 
-local PlayerFishingProgressByUserId: { [number]: PlayerFishingProgress } = {}
 local LastAcceptedShipCFrameByUserId: { [number]: CFrame } = {}
 
 local function getOrCreateRemoteFolder(): Folder
@@ -102,45 +105,12 @@ local FishCaughtRemote = getOrCreateRemoteEvent(FishCaughtRemoteName)
 local ShipMovementRequestedRemote = getOrCreateRemoteEvent(ShipMovementRequestRemoteName)
 
 local function getFishingProgressForPlayer(player: Player): PlayerFishingProgress
-	-- The prototype stores progress in memory so the gameplay loop is readable before persistence is added.
-	local existingProgress = PlayerFishingProgressByUserId[player.UserId]
-
-	if existingProgress then
-		return existingProgress
-	end
-
-	local newProgress: PlayerFishingProgress = {
-		NetLevel = 1,
-		LuckUpgradeLevel = 0,
-		Coins = 0,
+	-- Fishing reads upgrades through DataManager so saved profile values drive the RNG.
+	return {
+		NetLevel = DataManager.GetNetLevel(player),
+		LuckUpgradeLevel = DataManager.GetLuckUpgradeLevel(player),
+		Coins = DataManager.GetCoins(player),
 	}
-
-	PlayerFishingProgressByUserId[player.UserId] = newProgress
-
-	return newProgress
-end
-
-local function getOrCreateLeaderstatsCoins(player: Player): IntValue
-	-- Leaderstats make the prototype reward loop visible without adding a custom economy UI yet.
-	local leaderstatsFolder = player:FindFirstChild("leaderstats")
-
-	if not leaderstatsFolder then
-		leaderstatsFolder = Instance.new("Folder")
-		leaderstatsFolder.Name = "leaderstats"
-		leaderstatsFolder.Parent = player
-	end
-
-	local coinsValue = leaderstatsFolder:FindFirstChild("Coins")
-
-	if coinsValue and coinsValue:IsA("IntValue") then
-		return coinsValue
-	end
-
-	local newCoinsValue = Instance.new("IntValue")
-	newCoinsValue.Name = "Coins"
-	newCoinsValue.Parent = leaderstatsFolder
-
-	return newCoinsValue
 end
 
 local function calculateLuckMultiplier(playerFishingProgress: PlayerFishingProgress): number
@@ -211,8 +181,7 @@ local function castNetForPlayer(player: Player): CastNetResult
 		totalSellValue += rolledFish.SellValue
 	end
 
-	playerFishingProgress.Coins += totalSellValue
-	getOrCreateLeaderstatsCoins(player).Value = playerFishingProgress.Coins
+	DataManager.AddCoins(player, totalSellValue)
 
 	return {
 		FishCaught = fishCaught,
@@ -244,6 +213,10 @@ end
 
 local function handleCastNetRequested(player: Player)
 	-- One remote call performs one complete server-authoritative fishing roll.
+	if not DataManager.WaitForProfile(player, 5) then
+		return
+	end
+
 	local castNetResult = castNetForPlayer(player)
 
 	FishCaughtRemote:FireClient(player, castNetResult)
@@ -286,20 +259,17 @@ end
 
 local function handlePlayerRemoving(player: Player)
 	-- Clearing memory prevents test sessions from keeping stale prototype data forever.
-	PlayerFishingProgressByUserId[player.UserId] = nil
 	LastAcceptedShipCFrameByUserId[player.UserId] = nil
 end
 
-function FishingEcosystemService.Start()
+local function initializeFishingEcosystemService()
 	-- Start wires remotes once; the service stays simple because each handler is small and named.
 	CastNetRequestedRemote.OnServerEvent:Connect(handleCastNetRequested)
 	ShipMovementRequestedRemote.OnServerEvent:Connect(handleShipMovementRequested)
-	Players.PlayerAdded:Connect(function(player)
-		-- Creating the visible counter on join helps testers immediately see fishing rewards.
-		getOrCreateLeaderstatsCoins(player)
-	end)
 	Players.PlayerRemoving:Connect(handlePlayerRemoving)
 	connectShipCastNetPrompt()
 end
+
+initializeFishingEcosystemService()
 
 return FishingEcosystemService

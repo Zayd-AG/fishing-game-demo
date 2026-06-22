@@ -413,8 +413,8 @@ local function handleStoreStatusChanged(storeData)
 	)
 end
 
-function StoreBuilderController.Start()
-	-- Start connects input and render updates without introducing a larger controller framework.
+local function initializeStoreBuilderController()
+	-- Initialization connects input and render updates without introducing a larger controller framework.
 	createPrototypeHud()
 	UserInputService.InputBegan:Connect(handleInputBegan)
 	RunService.RenderStepped:Connect(updateGhostBlock)
@@ -427,5 +427,7 @@ function StoreBuilderController.Start()
 		end)
 	end
 end
+
+initializeStoreBuilderController()
 
 return StoreBuilderController

@@ -25,6 +25,10 @@ local Players = game:GetService("Players")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local RunService = game:GetService("RunService")
 
+require(script.Parent.PlayerProfileStore)
+
+local DataManager = require(script.Parent.DataManager)
+
 local CustomerAIService = {}
 
 local RemoteFolderName = "GameRemotes"
@@ -41,7 +45,6 @@ local DespawnDistanceStuds = 60
 local MessChanceAfterCustomerLeaves = 0.25
 
 local ActiveCustomerStates: { CustomerState } = {}
-local StoreManagementDataByUserId: { [number]: StoreManagementData } = {}
 local SecondsSinceLastCustomerSpawn = CustomerSpawnIntervalSeconds
 
 local function getOrCreateRemoteFolder(): Folder
@@ -78,30 +81,13 @@ end
 local PlaceStoreItemRequestedRemote = getOrCreateRemoteEvent(PlaceStoreItemRequestRemoteName)
 local StoreStatusChangedRemote = getOrCreateRemoteEvent(StoreStatusChangedRemoteName)
 
-local function getStoreDataForPlayer(player: Player): StoreManagementData
-	-- Store data is intentionally small so the tycoon loop can be understood in one file.
-	local existingStoreData = StoreManagementDataByUserId[player.UserId]
-
-	if existingStoreData then
-		return existingStoreData
-	end
-
-	local newStoreData: StoreManagementData = {
-		StoreLevel = 1,
-		StoreWidthInCells = 8,
-		StoreDepthInCells = 8,
-		MessCount = 0,
-		CoinsWaitingToCollect = 0,
-	}
-
-	StoreManagementDataByUserId[player.UserId] = newStoreData
-
-	return newStoreData
-end
-
 local function sendStoreStatusToPlayer(player: Player)
 	-- The client gets one small data packet whenever the store changes so the UI stays honest.
-	StoreStatusChangedRemote:FireClient(player, getStoreDataForPlayer(player))
+	local storeData = DataManager.GetStoreStatus(player)
+
+	if storeData then
+		StoreStatusChangedRemote:FireClient(player, storeData)
+	end
 end
 
 local function calculateStoreSizeForLevel(storeLevel: number): (number, number)
@@ -114,29 +100,19 @@ end
 
 local function upgradeStoreSpaceForPlayer(player: Player)
 	-- Upgrading only changes data here; the client builder reads bounds from Studio placeholder parts.
-	local storeData = getStoreDataForPlayer(player)
-
-	storeData.StoreLevel += 1
-
-	local storeWidthInCells, storeDepthInCells = calculateStoreSizeForLevel(storeData.StoreLevel)
-
-	storeData.StoreWidthInCells = storeWidthInCells
-	storeData.StoreDepthInCells = storeDepthInCells
+	DataManager.UpgradeStoreSpace(player)
+	sendStoreStatusToPlayer(player)
 end
 
 local function addMessToStore(player: Player)
 	-- Mess is a simple counter first, and later can become real spill/trash parts placed in Studio.
-	local storeData = getStoreDataForPlayer(player)
-
-	storeData.MessCount += 1
+	DataManager.AddMess(player)
 	sendStoreStatusToPlayer(player)
 end
 
 local function cleanOneMessFromStore(player: Player)
 	-- Clamping at zero keeps cleanup buttons from accidentally creating negative mess.
-	local storeData = getStoreDataForPlayer(player)
-
-	storeData.MessCount = math.max(0, storeData.MessCount - 1)
+	DataManager.CleanOneMess(player)
 	sendStoreStatusToPlayer(player)
 end
 
@@ -353,9 +329,7 @@ local function updateBuyingState(customerState: CustomerState, deltaTime: number
 	local customerOwner = chooseCustomerOwner()
 
 	if customerOwner then
-		local storeData = getStoreDataForPlayer(customerOwner)
-
-		storeData.CoinsWaitingToCollect += 12
+		DataManager.AddCoinsWaitingToCollect(customerOwner, 12)
 		sendStoreStatusToPlayer(customerOwner)
 
 		if math.random() < MessChanceAfterCustomerLeaves then
@@ -470,8 +444,30 @@ local function createFishTankAtCFrame(itemWorldCFrame: CFrame)
 	fishTankModel.Parent = getPlacementCollisionFolder()
 end
 
+local function getCFrameFromSavedPlacedStoreItem(savedPlacedStoreItem: DataManager.SavedPlacedStoreItem): CFrame
+	-- Saved placement numbers are converted back into a CFrame only after they leave the DataStore profile.
+	local savedPosition = savedPlacedStoreItem.Position
+	local position = Vector3.new(savedPosition.X, savedPosition.Y, savedPosition.Z)
+	local rotation = CFrame.Angles(0, math.rad(savedPlacedStoreItem.RotationYDegrees), 0)
+
+	return CFrame.new(position) * rotation
+end
+
+local function loadSavedStoreItemsForPlayer(player: Player)
+	-- Rebuilding saved items on profile load makes build mode persistence visible on rejoin.
+	for _, savedPlacedStoreItem in DataManager.GetPlacedStoreItems(player) do
+		if savedPlacedStoreItem.ItemName == "FishTank" then
+			createFishTankAtCFrame(getCFrameFromSavedPlacedStoreItem(savedPlacedStoreItem))
+		end
+	end
+end
+
 local function handlePlaceStoreItemRequested(player: Player, itemName: string, itemWorldCFrame: CFrame)
 	-- This is the server authority point for build mode: clients request placement, but the server decides.
+	if not DataManager.WaitForProfile(player, 5) then
+		return
+	end
+
 	if itemName ~= "FishTank" then
 		return
 	end
@@ -491,6 +487,7 @@ local function handlePlaceStoreItemRequested(player: Player, itemName: string, i
 	end
 
 	createFishTankAtCFrame(itemWorldCFrame)
+	DataManager.AddPlacedStoreItem(player, itemName, itemWorldCFrame)
 	sendStoreStatusToPlayer(player)
 end
 
@@ -530,17 +527,21 @@ local function updateAllCustomers(deltaTime: number)
 end
 
 local function handlePlayerRemoving(player: Player)
-	-- Prototype data is cleaned with the player because persistence is intentionally not wired yet.
-	StoreManagementDataByUserId[player.UserId] = nil
+	-- Profile cleanup is owned by PlayerProfileStore; customer AI only needs this hook for future per-player cleanup.
 end
 
-function CustomerAIService.Start()
+local function initializeCustomerAIService()
 	-- Heartbeat is enough for prototype AI because movement is simple and server-owned.
 	RunService.Heartbeat:Connect(updateAllCustomers)
 	PlaceStoreItemRequestedRemote.OnServerEvent:Connect(handlePlaceStoreItemRequested)
-	Players.PlayerAdded:Connect(sendStoreStatusToPlayer)
+	DataManager.ProfileLoaded:Connect(function(player: Player)
+		loadSavedStoreItemsForPlayer(player)
+		sendStoreStatusToPlayer(player)
+	end)
 	Players.PlayerRemoving:Connect(handlePlayerRemoving)
 end
+
+initializeCustomerAIService()
 
 CustomerAIService.UpgradeStoreSpaceForPlayer = upgradeStoreSpaceForPlayer
 CustomerAIService.CleanOneMessFromStore = cleanOneMessFromStore

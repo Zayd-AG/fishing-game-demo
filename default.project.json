@@ -9,7 +9,10 @@
     },
     "ServerScriptService": {
       "Server": {
-        "$path": "src/server"
+        "$path": "src/server/Server.server.luau"
+      },
+      "ServerModules": {
+        "$path": "src/server/modules"
       },
       "ServerPackages": {
         "$path": "ServerPackages"
@@ -18,7 +21,10 @@
     "StarterPlayer": {
       "StarterPlayerScripts": {
         "Client": {
-          "$path": "src/client"
+          "$path": "src/client/Client.client.luau"
+        },
+        "ClientModules": {
+          "$path": "src/client/modules"
         }
       }
     }
