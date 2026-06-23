@@ -8,42 +8,29 @@ local ProfileTemplate = require(script.Parent.ProfileTemplate)
 
 local PlayerProfileStore = {}
 
-local ProfileStoreName = if RunService:IsStudio() then "Studio" else "Live"
-local PlayerStore = ProfileStore.New(ProfileStoreName, ProfileTemplate)
-local Profiles = DataManager.Profiles
-local LoadingProfiles: { [Player]: boolean } = {}
+local function storeName(): string
+	return if RunService:IsStudio() then "Studio" else "Live"
+end
 
-local function createLeaderstatsForPlayer(player: Player): IntValue
-	-- Leaderstats are created once the profile is safe so visible coins always mirror saved data.
-	local leaderstatsFolder = player:FindFirstChild("leaderstats")
+local PlayerStore = ProfileStore.New(storeName(), ProfileTemplate)
 
-	if not leaderstatsFolder then
-		leaderstatsFolder = Instance.new("Folder")
-		leaderstatsFolder.Name = "leaderstats"
-		leaderstatsFolder.Parent = player
-	end
+local function createLeaderstatsForPlayer(player: Player, coins: number)
+	-- Leaderstats are created after the profile loads so the visible value starts from saved data.
+	local leaderstatsFolder = Instance.new("Folder")
+	leaderstatsFolder.Name = "leaderstats"
+	leaderstatsFolder.Parent = player
 
-	local coinsValue = leaderstatsFolder:FindFirstChild("Coins")
-
-	if coinsValue and coinsValue:IsA("IntValue") then
-		return coinsValue
-	end
-
-	local newCoinsValue = Instance.new("IntValue")
-	newCoinsValue.Name = "Coins"
-	newCoinsValue.Value = 0
-	newCoinsValue.Parent = leaderstatsFolder
-
-	return newCoinsValue
+	local coinsValue = Instance.new("IntValue")
+	coinsValue.Name = "Coins"
+	coinsValue.Value = coins
+	coinsValue.Parent = leaderstatsFolder
 end
 
 local function PlayerAdded(player: Player)
 	-- Start one ProfileStore session for this player's saved data.
-	if Profiles[player] ~= nil or LoadingProfiles[player] then
+	if DataManager.Profiles[player] ~= nil then
 		return
 	end
-
-	LoadingProfiles[player] = true
 
 	local profile = PlayerStore:StartSessionAsync(`{player.UserId}`, {
 		Cancel = function()
@@ -56,25 +43,21 @@ local function PlayerAdded(player: Player)
 		profile:Reconcile()
 
 		profile.OnSessionEnd:Connect(function()
-			Profiles[player] = nil
-			LoadingProfiles[player] = nil
-			DataManager.RemoveProfileForPlayer(player)
+			DataManager.Profiles[player] = nil
 			player:Kick("Profile session end - Please rejoin")
 		end)
 
 		if player.Parent == Players then
-			createLeaderstatsForPlayer(player)
-			LoadingProfiles[player] = nil
-			DataManager.SetProfileForPlayer(player, profile)
+			DataManager.Profiles[player] = profile
+			createLeaderstatsForPlayer(player, profile.Data.Coins)
+			DataManager.SyncPlayer(player)
 			print(`Profile loaded for {player.DisplayName}!`)
 		else
 			-- The player left before the profile session started, so we release the lock immediately.
-			LoadingProfiles[player] = nil
 			profile:EndSession()
 		end
 	else
 		-- This should only happen when the Roblox server is shutting down or the load was cancelled.
-		LoadingProfiles[player] = nil
 		player:Kick("Profile load fail - Please rejoin")
 	end
 end
@@ -86,26 +69,15 @@ end
 
 Players.PlayerAdded:Connect(PlayerAdded)
 
-task.spawn(function()
-	-- Studio sometimes creates the test player during script startup; this scan catches that without a Start method.
-	for _ = 1, 15 do
-		for _, player in Players:GetPlayers() do
-			if Profiles[player] == nil and not LoadingProfiles[player] then
-				task.spawn(PlayerAdded, player)
-			end
-		end
-
-		task.wait(1)
-	end
-end)
-
 Players.PlayerRemoving:Connect(function(player: Player)
-	local profile = Profiles[player]
-	LoadingProfiles[player] = nil
+	local profile = DataManager.Profiles[player]
 
-	if profile ~= nil then
-		profile:EndSession()
+	if not profile then
+		return
 	end
+
+	profile:EndSession()
+	DataManager.Profiles[player] = nil
 end)
 
 return PlayerProfileStore

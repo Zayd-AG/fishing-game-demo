@@ -31,19 +31,17 @@ local Players = game:GetService("Players")
 
 local DataManager = {}
 
-local ActiveProfilesByPlayer: { [Player]: LoadedProfile } = {}
+local Profiles: { [Player]: LoadedProfile } = {}
 local ProfileLoadedBindable = Instance.new("BindableEvent")
-local ProfileReleasedBindable = Instance.new("BindableEvent")
 local DataChangedBindable = Instance.new("BindableEvent")
 
-DataManager.Profiles = ActiveProfilesByPlayer
+DataManager.Profiles = Profiles
 DataManager.ProfileLoaded = ProfileLoadedBindable.Event
-DataManager.ProfileReleased = ProfileReleasedBindable.Event
 DataManager.DataChanged = DataChangedBindable.Event
 
 local function getProfileForPlayer(player: Player): LoadedProfile?
-	-- Every data function goes through this lookup so unloaded players never mutate a missing profile.
-	return ActiveProfilesByPlayer[player]
+	-- Every data function reads the external profile table directly, just like the standard setup.
+	return DataManager.Profiles[player]
 end
 
 local function getDataForPlayer(player: Player): PlayerData?
@@ -110,17 +108,16 @@ local function fireDataChangedForPlayer(player: Player)
 	DataChangedBindable:Fire(player, DataManager.GetPlayerDataSnapshot(player))
 end
 
-function DataManager.SetProfileForPlayer(player: Player, profile: LoadedProfile)
-	-- PlayerProfileStore calls this only after AddUserId and Reconcile have made the data safe to use.
-	ActiveProfilesByPlayer[player] = profile
+function DataManager.SyncPlayer(player: Player)
+	-- PlayerProfileStore calls this after assigning DataManager.Profiles[player].
+	local profile = getProfileForPlayer(player)
+
+	if not profile then
+		return
+	end
+
 	ProfileLoadedBindable:Fire(player, profile.Data)
 	fireDataChangedForPlayer(player)
-end
-
-function DataManager.RemoveProfileForPlayer(player: Player)
-	-- Removing the profile blocks late remotes from changing data after the session has ended.
-	ActiveProfilesByPlayer[player] = nil
-	ProfileReleasedBindable:Fire(player)
 end
 
 function DataManager.WaitForProfile(player: Player, timeoutSeconds: number?): boolean
