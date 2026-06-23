@@ -30,12 +30,14 @@ local PlayerStatusRequestRemoteName = "PlayerStatusRequested"
 local PlacementCollisionFolderName = "PlacedStoreItems"
 
 local GridCellSize = 4
+local MaxBuildHeightInCells = 4
 local StoreBoundsPartName = "StorePlacementBounds"
 local CustomerSpawnIntervalSeconds = 6
 local CustomerWalkSpeedStudsPerSecond = 8
 local BrowseDurationSeconds = 5
 local DespawnDistanceStuds = 60
 local MessChanceAfterCustomerLeaves = 0.25
+local OverlapCheckInsetStuds = 0.05
 
 local ActiveCustomerStates: { CustomerState } = {}
 local SecondsSinceLastCustomerSpawn = CustomerSpawnIntervalSeconds
@@ -388,11 +390,16 @@ local function isPlacementInsideStoreBounds(itemWorldCFrame: CFrame, itemWorldSi
 	local halfStoreDepth = storeBoundsPart.Size.Z / 2
 	local halfItemWidth = itemWorldSize.X / 2
 	local halfItemDepth = itemWorldSize.Z / 2
+	local localBottomY = localPositionInsideStore.Y - (itemWorldSize.Y / 2)
+	local localTopY = localPositionInsideStore.Y + (itemWorldSize.Y / 2)
+	local maximumBuildHeightStuds = MaxBuildHeightInCells * GridCellSize
 
 	return localPositionInsideStore.X - halfItemWidth >= -halfStoreWidth
 		and localPositionInsideStore.X + halfItemWidth <= halfStoreWidth
 		and localPositionInsideStore.Z - halfItemDepth >= -halfStoreDepth
 		and localPositionInsideStore.Z + halfItemDepth <= halfStoreDepth
+		and localBottomY >= 0
+		and localTopY <= maximumBuildHeightStuds
 end
 
 local function doesPlacementOverlapExistingItems(itemWorldCFrame: CFrame, itemWorldSize: Vector3): boolean
@@ -401,7 +408,13 @@ local function doesPlacementOverlapExistingItems(itemWorldCFrame: CFrame, itemWo
 	overlapParameters.FilterType = Enum.RaycastFilterType.Include
 	overlapParameters.FilterDescendantsInstances = { getPlacementCollisionFolder() }
 
-	local overlappingParts = workspace:GetPartBoundsInBox(itemWorldCFrame, itemWorldSize, overlapParameters)
+	-- Shrinking the box slightly lets a new tank sit on top of another tank without face-touching counting as overlap.
+	local insetItemWorldSize = Vector3.new(
+		math.max(0.1, itemWorldSize.X - OverlapCheckInsetStuds),
+		math.max(0.1, itemWorldSize.Y - OverlapCheckInsetStuds),
+		math.max(0.1, itemWorldSize.Z - OverlapCheckInsetStuds)
+	)
+	local overlappingParts = workspace:GetPartBoundsInBox(itemWorldCFrame, insetItemWorldSize, overlapParameters)
 
 	return #overlappingParts > 0
 end
@@ -474,7 +487,7 @@ local function handlePlaceStoreItemRequested(player: Player, itemName: string, i
 		return
 	end
 
-	local itemWorldSize = Vector3.new(GridCellSize * 2, 3, GridCellSize)
+	local itemWorldSize = Vector3.new(GridCellSize * 2, GridCellSize, GridCellSize)
 
 	if not isPlacementInsideStoreBounds(itemWorldCFrame, itemWorldSize) then
 		return

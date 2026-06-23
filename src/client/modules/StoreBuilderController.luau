@@ -10,6 +10,7 @@ export type GridPlacementResult = {
 	IsValid: boolean,
 	WorldCFrame: CFrame,
 	GridX: number,
+	GridY: number,
 	GridZ: number,
 	FailureReason: string?,
 }
@@ -32,9 +33,11 @@ local StoreStatusChangedRemoteName = "StoreStatusChanged"
 local PlayerStatusRequestRemoteName = "PlayerStatusRequested"
 
 local GridCellSize = 4
+local MaxBuildHeightInCells = 4
 local StoreBoundsPartName = "StorePlacementBounds"
 local PlacementCollisionFolderName = "PlacedStoreItems"
 local GhostBlockTransparency = 0
+local OverlapCheckInsetStuds = 0.05
 
 local BuildableItemsByName: { [string]: BuildableItemDefinition } = {
 	FishTank = {
@@ -194,7 +197,7 @@ end
 local function snapWorldPositionToStoreGrid(
 	worldPosition: Vector3,
 	storeBoundsPart: BasePart
-): (number, number, Vector3)
+): (number, number, number, Vector3)
 	-- Object space turns an angled store into a flat local grid, so snapping still works if the plot rotates.
 	local localPositionInsideStore = storeBoundsPart.CFrame:PointToObjectSpace(worldPosition)
 
@@ -207,7 +210,7 @@ local function snapWorldPositionToStoreGrid(
 		Vector3.new(snappedGridX * GridCellSize, snappedGridY * GridCellSize, snappedGridZ * GridCellSize)
 	local snappedWorldPosition = storeBoundsPart.CFrame:PointToWorldSpace(snappedLocalPosition)
 
-	return snappedGridX, snappedGridZ, snappedGridY, snappedWorldPosition
+	return snappedGridX, snappedGridY, snappedGridZ, snappedWorldPosition
 end
 
 local function isPlacementInsideStoreBounds(
@@ -219,10 +222,8 @@ local function isPlacementInsideStoreBounds(
 ): boolean
 	-- Half extents let us compare the item footprint against the store footprint from the center outward.
 	local halfStoreWidthInCells = math.floor((storeBoundsPart.Size.X / GridCellSize) / 2)
-	local halfStoreHeightInCells = math.floor(storeBoundsPart.Size.Y * 40)
 	local halfStoreDepthInCells = math.floor(storeBoundsPart.Size.Z / 2)
 	local halfItemWidthInCells = itemDefinition.GridWidthInCells / 2
-	local halfItemHeightInCells = itemDefinition.GridHeightInCells / 2
 	local halfItemDepthInCells = itemDefinition.GridDepthInCells / 2
 
 	if gridX - halfItemWidthInCells < -halfStoreWidthInCells then
@@ -233,11 +234,11 @@ local function isPlacementInsideStoreBounds(
 		return false
 	end
 
-	if gridY - halfItemHeightInCells < -halfStoreHeightInCells then
+	if gridY < 0 then
 		return false
 	end
 
-	if gridY + halfItemHeightInCells > halfStoreHeightInCells then
+	if gridY + itemDefinition.GridHeightInCells > MaxBuildHeightInCells then
 		return false
 	end
 
@@ -258,7 +259,13 @@ local function doesPlacementOverlapExistingItems(itemWorldCFrame: CFrame, itemWo
 	overlapParameters.FilterType = Enum.RaycastFilterType.Include
 	overlapParameters.FilterDescendantsInstances = { getOrCreatePlacementCollisionFolder() }
 
-	local overlappingParts = workspace:GetPartBoundsInBox(itemWorldCFrame, itemWorldSize, overlapParameters)
+	-- Shrinking the box slightly lets tanks touch faces vertically without counting as clipped into each other.
+	local insetItemWorldSize = Vector3.new(
+		math.max(0.1, itemWorldSize.X - OverlapCheckInsetStuds),
+		math.max(0.1, itemWorldSize.Y - OverlapCheckInsetStuds),
+		math.max(0.1, itemWorldSize.Z - OverlapCheckInsetStuds)
+	)
+	local overlappingParts = workspace:GetPartBoundsInBox(itemWorldCFrame, insetItemWorldSize, overlapParameters)
 
 	return #overlappingParts > 0
 end
@@ -299,7 +306,7 @@ local function calculatePlacementFromMouse(): GridPlacementResult?
 		return nil
 	end
 
-	local gridX, gridZ, gridY, snappedWorldPosition = snapWorldPositionToStoreGrid(mouseWorldPosition, storeBoundsPart)
+	local gridX, gridY, gridZ, snappedWorldPosition = snapWorldPositionToStoreGrid(mouseWorldPosition, storeBoundsPart)
 	local itemWorldSize = calculateItemWorldSize(SelectedBuildableItem)
 
 	-- Raising by half height places the preview on top of the store plane instead of halfway through it.
