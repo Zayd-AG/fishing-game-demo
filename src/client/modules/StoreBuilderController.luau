@@ -38,6 +38,7 @@ local StoreBoundsPartName = "StorePlacementBounds"
 local PlacementCollisionFolderName = "PlacedStoreItems"
 local GhostBlockTransparency = 0
 local OverlapCheckInsetStuds = 0.05
+local RotationStepDegrees = 90
 
 local BuildableItemsByName: { [string]: BuildableItemDefinition } = {
 	FishTank = {
@@ -51,6 +52,7 @@ local BuildableItemsByName: { [string]: BuildableItemDefinition } = {
 
 local IsBuildModeEnabled = false
 local SelectedBuildableItem: BuildableItemDefinition = BuildableItemsByName.FishTank
+local CurrentRotationYDegrees = 0
 local GhostBlock: Part? = nil
 local LastPlacementResult: GridPlacementResult? = nil
 local StatusLabel: TextLabel? = nil
@@ -186,12 +188,26 @@ local function setGhostBlockColor(isPlacementValid: boolean)
 end
 
 local function calculateItemWorldSize(itemDefinition: BuildableItemDefinition): Vector3
-	-- Multiplying grid cells by cell size converts designer-friendly grid dimensions into Roblox studs.
+	-- This is the item's own local size, so rotating the CFrame turns the long side correctly in the world.
 	return Vector3.new(
 		itemDefinition.GridWidthInCells * GridCellSize,
 		itemDefinition.GridHeightInCells * GridCellSize,
 		itemDefinition.GridDepthInCells * GridCellSize
 	)
+end
+
+local function isCurrentRotationSideways(): boolean
+	-- A 90 or 270 degree turn swaps how the item's width and depth sit on the store grid.
+	return CurrentRotationYDegrees % 180 ~= 0
+end
+
+local function getCurrentRotatedGridFootprint(itemDefinition: BuildableItemDefinition): (number, number, number)
+	-- The preview size stays in item-local space, but bounds checks need the footprint after rotation.
+	if isCurrentRotationSideways() then
+		return itemDefinition.GridDepthInCells, itemDefinition.GridHeightInCells, itemDefinition.GridWidthInCells
+	end
+
+	return itemDefinition.GridWidthInCells, itemDefinition.GridHeightInCells, itemDefinition.GridDepthInCells
 end
 
 local function snapWorldPositionToStoreGrid(
@@ -222,9 +238,10 @@ local function isPlacementInsideStoreBounds(
 ): boolean
 	-- Half extents let us compare the item footprint against the store footprint from the center outward.
 	local halfStoreWidthInCells = math.floor((storeBoundsPart.Size.X / GridCellSize) / 2)
-	local halfStoreDepthInCells = math.floor(storeBoundsPart.Size.Z / 2)
-	local halfItemWidthInCells = itemDefinition.GridWidthInCells / 2
-	local halfItemDepthInCells = itemDefinition.GridDepthInCells / 2
+	local halfStoreDepthInCells = math.floor((storeBoundsPart.Size.Z / GridCellSize) / 2)
+	local itemWidthInCells, itemHeightInCells, itemDepthInCells = getCurrentRotatedGridFootprint(itemDefinition)
+	local halfItemWidthInCells = itemWidthInCells / 2
+	local halfItemDepthInCells = itemDepthInCells / 2
 
 	if gridX - halfItemWidthInCells < -halfStoreWidthInCells then
 		return false
@@ -238,7 +255,7 @@ local function isPlacementInsideStoreBounds(
 		return false
 	end
 
-	if gridY + itemDefinition.GridHeightInCells > MaxBuildHeightInCells then
+	if gridY + itemHeightInCells > MaxBuildHeightInCells then
 		return false
 	end
 
@@ -311,7 +328,9 @@ local function calculatePlacementFromMouse(): GridPlacementResult?
 
 	-- Raising by half height places the preview on top of the store plane instead of halfway through it.
 	local liftedWorldPosition = snappedWorldPosition + Vector3.new(0, itemWorldSize.Y / 2, 0)
-	local itemWorldCFrame = CFrame.new(liftedWorldPosition) * storeBoundsPart.CFrame.Rotation
+	-- Store rotation follows the shop, and item rotation lets R turn the selected object in 90 degree steps.
+	local itemRotationCFrame = CFrame.Angles(0, math.rad(CurrentRotationYDegrees), 0)
+	local itemWorldCFrame = CFrame.new(liftedWorldPosition) * storeBoundsPart.CFrame.Rotation * itemRotationCFrame
 
 	if not isPlacementInsideStoreBounds(SelectedBuildableItem, gridX, gridY, gridZ, storeBoundsPart) then
 		return {
@@ -398,20 +417,26 @@ local function setBuildModeEnabled(shouldEnableBuildMode: boolean)
 	end
 
 	if IsBuildModeEnabled then
-		updateStatusText("Build mode is on. Move your mouse over the blue shop floor and click to place a fish tank.")
+		updateStatusText(
+			`Build mode is on. Move over the shop floor, press R to rotate ({CurrentRotationYDegrees} degrees), and click to place.`
+		)
 	else
 		updateStatusText("Build mode is off. Go to the ship prompt to cast your net, or press B to build.")
 	end
 end
 
 local function handleInputBegan(inputObject: InputObject, wasHandledByRoblox: boolean)
-	-- Build controls stay small for the prototype: B toggles mode, click places the selected item.
+	-- Build controls stay small for the prototype: B toggles, R rotates, and click places the selected item.
 	if wasHandledByRoblox then
 		return
 	end
 
 	if inputObject.KeyCode == Enum.KeyCode.B then
 		setBuildModeEnabled(not IsBuildModeEnabled)
+	elseif inputObject.KeyCode == Enum.KeyCode.R and IsBuildModeEnabled then
+		-- Modulo wraps 360 back to zero so rotation never grows into hard-to-read numbers.
+		CurrentRotationYDegrees = (CurrentRotationYDegrees + RotationStepDegrees) % 360
+		updateStatusText(`Rotated fish tank to {CurrentRotationYDegrees} degrees. Click a green preview to place it.`)
 	elseif inputObject.UserInputType == Enum.UserInputType.MouseButton1 and IsBuildModeEnabled then
 		placeSelectedItem()
 	end

@@ -377,11 +377,44 @@ local function getPlacementCollisionFolder(): Folder
 	return newFolder
 end
 
-local function isPlacementInsideStoreBounds(itemWorldCFrame: CFrame, itemWorldSize: Vector3): boolean
-	-- Object-space math lets the build area be moved or rotated in Studio without rewriting code.
+local function getStoreBoundsPart(): BasePart?
+	-- One helper keeps every server placement check tied to the same Studio-authored build area.
 	local storeBoundsPart = workspace:FindFirstChild(StoreBoundsPartName)
 
-	if not storeBoundsPart or not storeBoundsPart:IsA("BasePart") then
+	if storeBoundsPart and storeBoundsPart:IsA("BasePart") then
+		return storeBoundsPart
+	end
+
+	return nil
+end
+
+local function calculateFishTankLocalWorldSize(): Vector3
+	-- This is the fish tank's own local box, so rotating its CFrame rotates the long side correctly.
+	return Vector3.new(GridCellSize * 2, GridCellSize, GridCellSize)
+end
+
+local function isFishTankRotatedSideways(itemWorldCFrame: CFrame, storeBoundsPart: BasePart): boolean
+	-- Converting the tank look direction into store space tells us whether R turned it across the grid.
+	local localLookVector = storeBoundsPart.CFrame:VectorToObjectSpace(itemWorldCFrame.LookVector)
+
+	-- If the look direction points more across store X than store Z, the grid width/depth are swapped.
+	return math.abs(localLookVector.X) > math.abs(localLookVector.Z)
+end
+
+local function calculateFishTankBoundsWorldSize(itemWorldCFrame: CFrame, storeBoundsPart: BasePart): Vector3
+	-- Bounds checks compare against store X/Z axes, so a sideways tank needs its footprint swapped.
+	if isFishTankRotatedSideways(itemWorldCFrame, storeBoundsPart) then
+		return Vector3.new(GridCellSize, GridCellSize, GridCellSize * 2)
+	end
+
+	return calculateFishTankLocalWorldSize()
+end
+
+local function isPlacementInsideStoreBounds(itemWorldCFrame: CFrame, itemWorldSize: Vector3): boolean
+	-- Object-space math lets the build area be moved or rotated in Studio without rewriting code.
+	local storeBoundsPart = getStoreBoundsPart()
+
+	if not storeBoundsPart then
 		return false
 	end
 
@@ -487,13 +520,20 @@ local function handlePlaceStoreItemRequested(player: Player, itemName: string, i
 		return
 	end
 
-	local itemWorldSize = Vector3.new(GridCellSize * 2, GridCellSize, GridCellSize)
+	local storeBoundsPart = getStoreBoundsPart()
 
-	if not isPlacementInsideStoreBounds(itemWorldCFrame, itemWorldSize) then
+	if not storeBoundsPart then
 		return
 	end
 
-	if doesPlacementOverlapExistingItems(itemWorldCFrame, itemWorldSize) then
+	local itemLocalWorldSize = calculateFishTankLocalWorldSize()
+	local itemBoundsWorldSize = calculateFishTankBoundsWorldSize(itemWorldCFrame, storeBoundsPart)
+
+	if not isPlacementInsideStoreBounds(itemWorldCFrame, itemBoundsWorldSize) then
+		return
+	end
+
+	if doesPlacementOverlapExistingItems(itemWorldCFrame, itemLocalWorldSize) then
 		return
 	end
 
