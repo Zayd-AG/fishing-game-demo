@@ -1,6 +1,7 @@
 export type BuildableItemDefinition = {
 	Name: string,
 	GridWidthInCells: number,
+	GridHeightInCells: number,
 	GridDepthInCells: number,
 	PreviewColor: Color3,
 }
@@ -19,6 +20,7 @@ local RunService = game:GetService("RunService")
 local UserInputService = game:GetService("UserInputService")
 
 local StoreBuilderController = {}
+local PlacedStoreItems = workspace:WaitForChild("PlacedStoreItems")
 
 local LocalPlayer = Players.LocalPlayer
 local Mouse = LocalPlayer:GetMouse()
@@ -32,12 +34,13 @@ local PlayerStatusRequestRemoteName = "PlayerStatusRequested"
 local GridCellSize = 4
 local StoreBoundsPartName = "StorePlacementBounds"
 local PlacementCollisionFolderName = "PlacedStoreItems"
-local GhostBlockTransparency = 0.45
+local GhostBlockTransparency = 0
 
 local BuildableItemsByName: { [string]: BuildableItemDefinition } = {
 	FishTank = {
 		Name = "FishTank",
 		GridWidthInCells = 2,
+		GridHeightInCells = 1,
 		GridDepthInCells = 1,
 		PreviewColor = Color3.fromRGB(70, 180, 255),
 	},
@@ -183,36 +186,43 @@ local function calculateItemWorldSize(itemDefinition: BuildableItemDefinition): 
 	-- Multiplying grid cells by cell size converts designer-friendly grid dimensions into Roblox studs.
 	return Vector3.new(
 		itemDefinition.GridWidthInCells * GridCellSize,
-		2,
+		itemDefinition.GridHeightInCells * GridCellSize,
 		itemDefinition.GridDepthInCells * GridCellSize
 	)
 end
 
-local function snapWorldPositionToStoreGrid(worldPosition: Vector3, storeBoundsPart: BasePart): (number, number, Vector3)
+local function snapWorldPositionToStoreGrid(
+	worldPosition: Vector3,
+	storeBoundsPart: BasePart
+): (number, number, Vector3)
 	-- Object space turns an angled store into a flat local grid, so snapping still works if the plot rotates.
 	local localPositionInsideStore = storeBoundsPart.CFrame:PointToObjectSpace(worldPosition)
 
 	-- Dividing by cell size converts studs into grid cells; rounding chooses the nearest cell center.
 	local snappedGridX = math.round(localPositionInsideStore.X / GridCellSize)
+	local snappedGridY = math.round(localPositionInsideStore.Y / GridCellSize)
 	local snappedGridZ = math.round(localPositionInsideStore.Z / GridCellSize)
-
 	-- Multiplying back by cell size converts the chosen grid cell into local studs again.
-	local snappedLocalPosition = Vector3.new(snappedGridX * GridCellSize, 0, snappedGridZ * GridCellSize)
+	local snappedLocalPosition =
+		Vector3.new(snappedGridX * GridCellSize, snappedGridY * GridCellSize, snappedGridZ * GridCellSize)
 	local snappedWorldPosition = storeBoundsPart.CFrame:PointToWorldSpace(snappedLocalPosition)
 
-	return snappedGridX, snappedGridZ, snappedWorldPosition
+	return snappedGridX, snappedGridZ, snappedGridY, snappedWorldPosition
 end
 
 local function isPlacementInsideStoreBounds(
 	itemDefinition: BuildableItemDefinition,
 	gridX: number,
+	gridY: number,
 	gridZ: number,
 	storeBoundsPart: BasePart
 ): boolean
 	-- Half extents let us compare the item footprint against the store footprint from the center outward.
 	local halfStoreWidthInCells = math.floor((storeBoundsPart.Size.X / GridCellSize) / 2)
-	local halfStoreDepthInCells = math.floor((storeBoundsPart.Size.Z / GridCellSize) / 2)
+	local halfStoreHeightInCells = math.floor(storeBoundsPart.Size.Y * 40)
+	local halfStoreDepthInCells = math.floor(storeBoundsPart.Size.Z / 2)
 	local halfItemWidthInCells = itemDefinition.GridWidthInCells / 2
+	local halfItemHeightInCells = itemDefinition.GridHeightInCells / 2
 	local halfItemDepthInCells = itemDefinition.GridDepthInCells / 2
 
 	if gridX - halfItemWidthInCells < -halfStoreWidthInCells then
@@ -220,6 +230,14 @@ local function isPlacementInsideStoreBounds(
 	end
 
 	if gridX + halfItemWidthInCells > halfStoreWidthInCells then
+		return false
+	end
+
+	if gridY - halfItemHeightInCells < -halfStoreHeightInCells then
+		return false
+	end
+
+	if gridY + halfItemHeightInCells > halfStoreHeightInCells then
 		return false
 	end
 
@@ -256,7 +274,7 @@ local function getMouseWorldPositionOnStorePlane(storeBoundsPart: BasePart): Vec
 	local mouseRay = camera:ScreenPointToRay(Mouse.X, Mouse.Y)
 	local raycastParameters = RaycastParams.new()
 	raycastParameters.FilterType = Enum.RaycastFilterType.Include
-	raycastParameters.FilterDescendantsInstances = { storeBoundsPart }
+	raycastParameters.FilterDescendantsInstances = { storeBoundsPart, PlacedStoreItems }
 
 	local raycastResult = workspace:Raycast(mouseRay.Origin, mouseRay.Direction * 500, raycastParameters)
 
@@ -281,18 +299,19 @@ local function calculatePlacementFromMouse(): GridPlacementResult?
 		return nil
 	end
 
-	local gridX, gridZ, snappedWorldPosition = snapWorldPositionToStoreGrid(mouseWorldPosition, storeBoundsPart)
+	local gridX, gridZ, gridY, snappedWorldPosition = snapWorldPositionToStoreGrid(mouseWorldPosition, storeBoundsPart)
 	local itemWorldSize = calculateItemWorldSize(SelectedBuildableItem)
 
 	-- Raising by half height places the preview on top of the store plane instead of halfway through it.
 	local liftedWorldPosition = snappedWorldPosition + Vector3.new(0, itemWorldSize.Y / 2, 0)
 	local itemWorldCFrame = CFrame.new(liftedWorldPosition) * storeBoundsPart.CFrame.Rotation
 
-	if not isPlacementInsideStoreBounds(SelectedBuildableItem, gridX, gridZ, storeBoundsPart) then
+	if not isPlacementInsideStoreBounds(SelectedBuildableItem, gridX, gridY, gridZ, storeBoundsPart) then
 		return {
 			IsValid = false,
 			WorldCFrame = itemWorldCFrame,
 			GridX = gridX,
+			GridY = gridY,
 			GridZ = gridZ,
 			FailureReason = "Outside store bounds",
 		}
@@ -303,6 +322,7 @@ local function calculatePlacementFromMouse(): GridPlacementResult?
 			IsValid = false,
 			WorldCFrame = itemWorldCFrame,
 			GridX = gridX,
+			GridY = gridY,
 			GridZ = gridZ,
 			FailureReason = "Overlaps another item",
 		}
@@ -312,6 +332,7 @@ local function calculatePlacementFromMouse(): GridPlacementResult?
 		IsValid = true,
 		WorldCFrame = itemWorldCFrame,
 		GridX = gridX,
+		GridY = gridY,
 		GridZ = gridZ,
 	}
 end
@@ -397,7 +418,8 @@ local function handleFishCaught(castNetResult)
 		return
 	end
 
-	FishCaughtLabel.Text = `Caught {rarestFishCaught.RarityName}: {rarestFishCaught.Name}! +{castNetResult.TotalSellValue} coins`
+	FishCaughtLabel.Text =
+		`Caught {rarestFishCaught.RarityName}: {rarestFishCaught.Name}! +{castNetResult.TotalSellValue} coins`
 	FishCaughtLabel.Visible = true
 	updateStatusText("Nice catch. Add tanks in the shop so customers have something clear to browse.")
 

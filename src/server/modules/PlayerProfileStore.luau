@@ -32,7 +32,7 @@ local function PlayerAdded(player: Player)
 		return
 	end
 
-	local profile = PlayerStore:StartSessionAsync(`{player.UserId}`, {
+	local profile = PlayerStore:StartSessionAsync("Player__" .. player.UserId, {
 		Cancel = function()
 			return player.Parent ~= Players
 		end,
