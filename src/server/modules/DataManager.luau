@@ -34,10 +34,12 @@ local DataManager = {}
 local ActiveProfilesByPlayer: { [Player]: LoadedProfile } = {}
 local ProfileLoadedBindable = Instance.new("BindableEvent")
 local ProfileReleasedBindable = Instance.new("BindableEvent")
-local HasRequestedPlayerProfileStore = false
+local DataChangedBindable = Instance.new("BindableEvent")
 
+DataManager.Profiles = ActiveProfilesByPlayer
 DataManager.ProfileLoaded = ProfileLoadedBindable.Event
 DataManager.ProfileReleased = ProfileReleasedBindable.Event
+DataManager.DataChanged = DataChangedBindable.Event
 
 local function getProfileForPlayer(player: Player): LoadedProfile?
 	-- Every data function goes through this lookup so unloaded players never mutate a missing profile.
@@ -70,24 +72,49 @@ local function updateLeaderstatsCoins(player: Player, coins: number)
 	end
 end
 
-local function ensurePlayerProfileStoreHasBeenRequired()
-	-- If Studio startup order is awkward, the first data wait still pulls in the profile loader module.
-	if HasRequestedPlayerProfileStore then
+local function getPlacedStoreItemCount(data: PlayerData): number
+	-- The GUI only needs a count, not the full saved placement list.
+	return #data.PlacedStoreItems
+end
+
+function DataManager.GetPlayerDataSnapshot(player: Player)
+	-- The client receives display-safe values copied out of the live profile table.
+	local data = getDataForPlayer(player)
+
+	if not data then
+		return nil
+	end
+
+	return {
+		Coins = data.Coins,
+		NetLevel = data.NetLevel,
+		LuckUpgradeLevel = data.LuckUpgradeLevel,
+		StoreLevel = data.StoreLevel,
+		StoreWidthInCells = data.StoreWidthInCells,
+		StoreDepthInCells = data.StoreDepthInCells,
+		MessCount = data.MessCount,
+		CoinsWaitingToCollect = data.CoinsWaitingToCollect,
+		PlacedStoreItemCount = getPlacedStoreItemCount(data),
+	}
+end
+
+local function fireDataChangedForPlayer(player: Player)
+	-- Every profile mutation comes through here so leaderstats and GUI stay synced from the same data.
+	local data = getDataForPlayer(player)
+
+	if not data then
 		return
 	end
 
-	HasRequestedPlayerProfileStore = true
-
-	task.defer(function()
-		require(script.Parent.PlayerProfileStore)
-	end)
+	updateLeaderstatsCoins(player, data.Coins)
+	DataChangedBindable:Fire(player, DataManager.GetPlayerDataSnapshot(player))
 end
 
 function DataManager.SetProfileForPlayer(player: Player, profile: LoadedProfile)
 	-- PlayerProfileStore calls this only after AddUserId and Reconcile have made the data safe to use.
 	ActiveProfilesByPlayer[player] = profile
-	updateLeaderstatsCoins(player, profile.Data.Coins)
 	ProfileLoadedBindable:Fire(player, profile.Data)
+	fireDataChangedForPlayer(player)
 end
 
 function DataManager.RemoveProfileForPlayer(player: Player)
@@ -101,8 +128,6 @@ function DataManager.WaitForProfile(player: Player, timeoutSeconds: number?): bo
 	if getProfileForPlayer(player) then
 		return true
 	end
-
-	ensurePlayerProfileStoreHasBeenRequired()
 
 	local startedWaitingAt = os.clock()
 	local maximumWaitSeconds = timeoutSeconds or 10
@@ -133,7 +158,7 @@ function DataManager.AddCoins(player: Player, coinsToAdd: number): number
 	end
 
 	data.Coins += math.max(0, coinsToAdd)
-	updateLeaderstatsCoins(player, data.Coins)
+	fireDataChangedForPlayer(player)
 
 	return data.Coins
 end
@@ -162,6 +187,7 @@ function DataManager.AddCoinsWaitingToCollect(player: Player, coinsToAdd: number
 	end
 
 	data.CoinsWaitingToCollect += math.max(0, coinsToAdd)
+	fireDataChangedForPlayer(player)
 
 	return data.CoinsWaitingToCollect
 end
@@ -174,6 +200,7 @@ function DataManager.AddMess(player: Player): number
 	end
 
 	data.MessCount += 1
+	fireDataChangedForPlayer(player)
 
 	return data.MessCount
 end
@@ -186,6 +213,7 @@ function DataManager.CleanOneMess(player: Player): number
 	end
 
 	data.MessCount = math.max(0, data.MessCount - 1)
+	fireDataChangedForPlayer(player)
 
 	return data.MessCount
 end
@@ -200,6 +228,7 @@ function DataManager.UpgradeStoreSpace(player: Player): (number, number)
 	data.StoreLevel += 1
 	data.StoreWidthInCells = 8 + ((data.StoreLevel - 1) * 2)
 	data.StoreDepthInCells = 8 + ((data.StoreLevel - 1) * 2)
+	fireDataChangedForPlayer(player)
 
 	return data.StoreWidthInCells, data.StoreDepthInCells
 end
@@ -224,6 +253,7 @@ function DataManager.AddPlacedStoreItem(player: Player, itemName: string, itemWo
 	}
 
 	table.insert(data.PlacedStoreItems, savedPlacedStoreItem)
+	fireDataChangedForPlayer(player)
 
 	return savedPlacedStoreItem
 end

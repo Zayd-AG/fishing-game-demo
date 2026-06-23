@@ -9,11 +9,12 @@ local ProfileTemplate = require(script.Parent.ProfileTemplate)
 local PlayerProfileStore = {}
 
 local ProfileStoreName = if RunService:IsStudio() then "Studio" else "Live"
-local PlayerDataProfileStore = ProfileStore.New(ProfileStoreName, ProfileTemplate)
-local ActiveSessionProfilesByPlayer: { [Player]: any } = {}
+local PlayerStore = ProfileStore.New(ProfileStoreName, ProfileTemplate)
+local Profiles = DataManager.Profiles
+local LoadingProfiles: { [Player]: boolean } = {}
 
 local function createLeaderstatsForPlayer(player: Player): IntValue
-	-- Leaderstats are created before the profile loads so the player always sees a stable Coins counter.
+	-- Leaderstats are created once the profile is safe so visible coins always mirror saved data.
 	local leaderstatsFolder = player:FindFirstChild("leaderstats")
 
 	if not leaderstatsFolder then
@@ -36,89 +37,75 @@ local function createLeaderstatsForPlayer(player: Player): IntValue
 	return newCoinsValue
 end
 
-local function getProfileKeyForPlayer(player: Player): string
-	-- Prefixing the user id makes saved keys easy to inspect while debugging DataStore data.
-	return `Player_{player.UserId}`
-end
-
-local function shouldCancelSessionStart(player: Player): boolean
-	-- ProfileStore asks this while waiting on session locks; true means this player no longer needs a profile.
-	return player.Parent ~= Players or ProfileStore.IsClosing
-end
-
-local function startProfileSessionForPlayer(player: Player)
-	-- This follows the standard ProfileStore pattern: keep trying until a profile loads or the player leaves.
-	createLeaderstatsForPlayer(player)
-
-	local profile = nil
-
-	while player.Parent == Players and not ProfileStore.IsClosing and not profile do
-		profile = PlayerDataProfileStore:StartSessionAsync(getProfileKeyForPlayer(player), {
-			Cancel = function()
-				return shouldCancelSessionStart(player)
-			end,
-		})
-
-		if not profile then
-			-- A nil profile usually means a temporary session conflict, so we wait and try again.
-			task.wait(1)
-		end
-	end
-
-	if not profile then
+local function PlayerAdded(player: Player)
+	-- Start one ProfileStore session for this player's saved data.
+	if Profiles[player] ~= nil or LoadingProfiles[player] then
 		return
 	end
 
-	profile:AddUserId(player.UserId)
-	profile:Reconcile()
+	LoadingProfiles[player] = true
 
-	profile.OnSessionEnd:Connect(function()
-		-- Once the session ends, this server must stop touching the profile immediately.
-		ActiveSessionProfilesByPlayer[player] = nil
-		DataManager.RemoveProfileForPlayer(player)
+	local profile = PlayerStore:StartSessionAsync(`{player.UserId}`, {
+		Cancel = function()
+			return player.Parent ~= Players
+		end,
+	})
+
+	if profile ~= nil then
+		profile:AddUserId(player.UserId)
+		profile:Reconcile()
+
+		profile.OnSessionEnd:Connect(function()
+			Profiles[player] = nil
+			LoadingProfiles[player] = nil
+			DataManager.RemoveProfileForPlayer(player)
+			player:Kick("Profile session end - Please rejoin")
+		end)
 
 		if player.Parent == Players then
-			player:Kick("Your save data session ended. Please rejoin to keep your progress safe.")
+			createLeaderstatsForPlayer(player)
+			LoadingProfiles[player] = nil
+			DataManager.SetProfileForPlayer(player, profile)
+			print(`Profile loaded for {player.DisplayName}!`)
+		else
+			-- The player left before the profile session started, so we release the lock immediately.
+			LoadingProfiles[player] = nil
+			profile:EndSession()
 		end
-	end)
+	else
+		-- This should only happen when the Roblox server is shutting down or the load was cancelled.
+		LoadingProfiles[player] = nil
+		player:Kick("Profile load fail - Please rejoin")
+	end
+end
 
-	if player.Parent ~= Players then
+for _, player in Players:GetPlayers() do
+	-- Existing players are handled because Studio can create the test player before this module is required.
+	task.spawn(PlayerAdded, player)
+end
+
+Players.PlayerAdded:Connect(PlayerAdded)
+
+task.spawn(function()
+	-- Studio sometimes creates the test player during script startup; this scan catches that without a Start method.
+	for _ = 1, 15 do
+		for _, player in Players:GetPlayers() do
+			if Profiles[player] == nil and not LoadingProfiles[player] then
+				task.spawn(PlayerAdded, player)
+			end
+		end
+
+		task.wait(1)
+	end
+end)
+
+Players.PlayerRemoving:Connect(function(player: Player)
+	local profile = Profiles[player]
+	LoadingProfiles[player] = nil
+
+	if profile ~= nil then
 		profile:EndSession()
-		return
 	end
-
-	ActiveSessionProfilesByPlayer[player] = profile
-	DataManager.SetProfileForPlayer(player, profile)
-end
-
-local function endProfileSessionForPlayer(player: Player)
-	-- Ending the ProfileStore session saves one final time and releases the session lock.
-	local profile = ActiveSessionProfilesByPlayer[player]
-
-	if not profile then
-		return
-	end
-
-	ActiveSessionProfilesByPlayer[player] = nil
-	DataManager.RemoveProfileForPlayer(player)
-	profile:EndSession()
-end
-
-local function handlePlayerAdded(player: Player)
-	-- Loading in a task keeps PlayerAdded from blocking while DataStore work yields.
-	task.spawn(startProfileSessionForPlayer, player)
-end
-
-local function initializePlayerProfileStore()
-	-- Existing players are handled first because Studio can create the test player before this module is required.
-	for _, player in Players:GetPlayers() do
-		handlePlayerAdded(player)
-	end
-
-	Players.PlayerAdded:Connect(handlePlayerAdded)
-	Players.PlayerRemoving:Connect(endProfileSessionForPlayer)
-end
-
-initializePlayerProfileStore()
+end)
 
 return PlayerProfileStore

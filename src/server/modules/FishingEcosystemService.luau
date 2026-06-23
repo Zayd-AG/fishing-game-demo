@@ -21,8 +21,6 @@ export type CastNetResult = {
 local Players = game:GetService("Players")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 
-require(script.Parent.PlayerProfileStore)
-
 local DataManager = require(script.Parent.DataManager)
 
 local FishingEcosystemService = {}

@@ -27,6 +27,7 @@ local RemoteFolderName = "GameRemotes"
 local FishCaughtRemoteName = "FishCaught"
 local PlaceStoreItemRequestRemoteName = "PlaceStoreItemRequested"
 local StoreStatusChangedRemoteName = "StoreStatusChanged"
+local PlayerStatusRequestRemoteName = "PlayerStatusRequested"
 
 local GridCellSize = 4
 local StoreBoundsPartName = "StorePlacementBounds"
@@ -60,6 +61,7 @@ end
 local FishCaughtRemote = getRemoteEvent(FishCaughtRemoteName)
 local PlaceStoreItemRequestedRemote = getRemoteEvent(PlaceStoreItemRequestRemoteName)
 local StoreStatusChangedRemote = getRemoteEvent(StoreStatusChangedRemoteName)
+local PlayerStatusRequestedRemote = getRemoteEvent(PlayerStatusRequestRemoteName)
 
 local function getStoreBoundsPart(): BasePart?
 	-- A simple Studio part defines the buildable area so level designers can resize the store visually.
@@ -409,7 +411,7 @@ end
 local function handleStoreStatusChanged(storeData)
 	-- Store data feedback makes customer purchases and mess visible before final tycoon UI exists.
 	updateStatusText(
-		`Shop level {storeData.StoreLevel} | Waiting coins: {storeData.CoinsWaitingToCollect} | Messes to clean: {storeData.MessCount}`
+		`Coins: {storeData.Coins} | Shop level {storeData.StoreLevel} | Till: {storeData.CoinsWaitingToCollect} | Messes: {storeData.MessCount} | Tanks: {storeData.PlacedStoreItemCount}`
 	)
 end
 
@@ -420,6 +422,7 @@ local function initializeStoreBuilderController()
 	RunService.RenderStepped:Connect(updateGhostBlock)
 	FishCaughtRemote.OnClientEvent:Connect(handleFishCaught)
 	StoreStatusChangedRemote.OnClientEvent:Connect(handleStoreStatusChanged)
+	PlayerStatusRequestedRemote:FireServer()
 
 	if BuildModeButton then
 		BuildModeButton.Activated:Connect(function()

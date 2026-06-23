@@ -1,10 +1,4 @@
-export type CustomerStateName =
-	"Spawning"
-	| "WalkingToStore"
-	| "Browsing"
-	| "Buying"
-	| "Leaving"
-	| "Despawning"
+export type CustomerStateName = "Spawning" | "WalkingToStore" | "Browsing" | "Buying" | "Leaving" | "Despawning"
 
 export type StoreManagementData = {
 	StoreLevel: number,
@@ -25,8 +19,6 @@ local Players = game:GetService("Players")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local RunService = game:GetService("RunService")
 
-require(script.Parent.PlayerProfileStore)
-
 local DataManager = require(script.Parent.DataManager)
 
 local CustomerAIService = {}
@@ -34,6 +26,7 @@ local CustomerAIService = {}
 local RemoteFolderName = "GameRemotes"
 local PlaceStoreItemRequestRemoteName = "PlaceStoreItemRequested"
 local StoreStatusChangedRemoteName = "StoreStatusChanged"
+local PlayerStatusRequestRemoteName = "PlayerStatusRequested"
 local PlacementCollisionFolderName = "PlacedStoreItems"
 
 local GridCellSize = 4
@@ -80,10 +73,11 @@ end
 
 local PlaceStoreItemRequestedRemote = getOrCreateRemoteEvent(PlaceStoreItemRequestRemoteName)
 local StoreStatusChangedRemote = getOrCreateRemoteEvent(StoreStatusChangedRemoteName)
+local PlayerStatusRequestedRemote = getOrCreateRemoteEvent(PlayerStatusRequestRemoteName)
 
 local function sendStoreStatusToPlayer(player: Player)
 	-- The client gets one small data packet whenever the store changes so the UI stays honest.
-	local storeData = DataManager.GetStoreStatus(player)
+	local storeData = DataManager.GetPlayerDataSnapshot(player)
 
 	if storeData then
 		StoreStatusChangedRemote:FireClient(player, storeData)
@@ -183,7 +177,11 @@ local function updateCustomerStateBillboard(customerState: CustomerState)
 	end
 end
 
-local function setCustomerState(customerState: CustomerState, nextStateName: CustomerStateName, targetPosition: Vector3?)
+local function setCustomerState(
+	customerState: CustomerState,
+	nextStateName: CustomerStateName,
+	targetPosition: Vector3?
+)
 	-- Every state transition refreshes the timer so each state can use simple elapsed-time checks.
 	customerState.StateName = nextStateName
 	customerState.StateStartedAt = os.clock()
@@ -534,8 +532,16 @@ local function initializeCustomerAIService()
 	-- Heartbeat is enough for prototype AI because movement is simple and server-owned.
 	RunService.Heartbeat:Connect(updateAllCustomers)
 	PlaceStoreItemRequestedRemote.OnServerEvent:Connect(handlePlaceStoreItemRequested)
+	PlayerStatusRequestedRemote.OnServerEvent:Connect(function(player: Player)
+		-- The client requests this after its HUD is ready so it cannot miss the initial profile snapshot.
+		sendStoreStatusToPlayer(player)
+	end)
 	DataManager.ProfileLoaded:Connect(function(player: Player)
 		loadSavedStoreItemsForPlayer(player)
+		sendStoreStatusToPlayer(player)
+	end)
+	DataManager.DataChanged:Connect(function(player: Player)
+		-- Any profile-backed data change refreshes the HUD from the same source as leaderstats.
 		sendStoreStatusToPlayer(player)
 	end)
 	Players.PlayerRemoving:Connect(handlePlayerRemoving)
